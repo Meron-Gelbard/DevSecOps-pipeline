@@ -1,0 +1,207 @@
+name: Java CI/CD with Maven
+on:
+  push:
+    branches:
+      - "main"
+    tags-ignore:
+      - v*
+
+jobs:
+  
+  SAST-job:
+    runs-on: ubuntu-22.04
+    if: ${{ !contains(github.event.head_commit.message, 'new version') }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.10'
+        
+    - name: Install Bandit & Safety
+      run: |
+        pip install bandit safety
+
+    - name: Run Bandit & Safety Static Analysis
+      working-directory: ./weather_app
+      run: | 
+        bandit -r *.py -ll -o bandit-report.txt -f txt
+        safety check -r requirements.txt --key "${{ secrets.SAFETY_API_KEY }}" > safety-report.txt || true
+    
+    - name: Create SAST Report
+      working-directory: ./weather_app
+      run: |
+        echo "Static Application Security Testing (SAST) - Report" > SAST-report.txt
+        cat safety-report.txt >> SAST-report.txt
+        echo "-------------------   Bandit - Static Analysis   ---------------------------" >> SAST-report.txt
+        cat bandit-report.txt >> SAST-report.txt
+
+    - name: Upload SAST Report to Build Artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: SAST-report
+        path: ./weather_app/SAST-report.txt
+
+    - name: Check SAST Report
+      working-directory: ./weather_app
+      run: |
+        if ! grep -q "No issues identified." bandit-report.txt; then
+          echo "Issues found by Bandit or the analysis failed"
+          exit 1
+        fi
+
+        if ! grep -q "No known security vulnerabilities reported." safety-report.txt; then
+          echo "Vulnerabilities found by Safety or the check failed"
+          exit 1
+        fi
+        echo "Code base passed SAST"
+    
+  Build-Test-Push:
+    runs-on: ubuntu-22.04
+    if: ${{ !contains(github.event.head_commit.message, 'new version') }}
+    permissions: 
+      contents: write
+    needs: SAST-job
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build new image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./weather_app
+        file: ./weather_app/Dockerfile
+        load: true
+        push: false
+        tags: web-app-image:new
+
+    - name: Trivy Vulnerability Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'web-app-image:new'
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Run new Docker container
+      run: |
+       docker run -d --network host \
+       -e WEATHER_API_KEY=${{ secrets.WEATHER_API_KEY }} \
+       -e LOCATION_API_KEY=${{ secrets.LOCATION_API_KEY }} \
+       web-app-image:new
+    
+    - name: Build tester image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./app_testing
+        file: ./app_testing/Dockerfile
+        load: true
+        push: false
+        tags: app-tester
+    
+    - name: Run test container
+      run: docker run --rm --network host app-tester
+
+    - name: versioning system
+      id: versioning
+      run: |
+        git config --global user.email pipeline_runner@github.com
+        git config --global user.name pipeline_runner
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$GITHUB_REPOSITORY
+        NEW_VERSION=$(bash ./weather_app/app_versioning.sh ./weather_app/.app_version patch)
+        git add .
+        git commit -m "new version - $NEW_VERSION"
+        git tag -a v$NEW_VERSION -m "Release version $NEW_VERSION"
+        git push --tags
+        git push
+        echo "NEW_VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Load signing key
+      run: |
+        echo "${{ secrets.DOCKER_SIGN_KEY64 }}" | base64 -d > docker_sign_key
+        chmod 600 docker_sign_key
+        echo ${{ secrets.DOCKER_KEY_PASS }} | docker trust key load docker_sign_key --name webapp-sign-key
+    
+    - name: Re-tag image
+      run: |
+        docker tag web-app-image:new ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_REPO }}:latest 
+        docker tag web-app-image:new ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_REPO }}:${{steps.versioning.outputs.NEW_VERSION}}
+    
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v1
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Push and sign Docker image
+      run: |
+        docker push ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_REPO }}:latest 
+        docker push ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_REPO }}:${{steps.versioning.outputs.NEW_VERSION}}
+
+
+  terraform-provision:
+    runs-on: ubuntu-22.04
+    if: ${{ !contains(github.event.head_commit.message, 'new version') }}
+    needs: Build-Test-Push
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v1
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Inspect Docker Image and Check Signer
+      run: |
+        SIGNER=$(docker trust inspect --pretty ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_REPO }}:latest | awk '/SIGNERS/{getline; print $3}')
+        echo "signer: $SIGNER"
+        if echo "$SIGNER" | grep -q "${{ secrets.DOCKER_SIGNER_NAME }}"; then
+          echo "Trusted signer found."
+        else
+          echo "Trusted signer not found."
+          exit 1
+        fi
+      
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: "0.14.11"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+    
+
+    - name: Deploy Terraform Backend
+      working-directory: ./terraform_backend
+      run: |
+        if aws s3 ls | grep -q "webapp-tf-backend"; then
+          echo "Terraform backend exists. Skipping creation..."
+        else
+          echo "Deploying Terraform backend infrastructure"
+          terraform init
+          terraform apply -auto-approve -var="aws_region=${{ secrets.AWS_REGION }}"
+        fi
+
+    - name: Deploy Terraform app module
+      working-directory: ./terraform_iac
+      run: |
+        terraform init
+        VERSION=$(cat ../weather_app/.app_version)
+        terraform state list | grep -q 'module.app.aws_instance.app' && terraform taint module.app.aws_instance.app
+        terraform apply -auto-approve \
+          -var="dockerhub_username=${{ secrets.DOCKER_USERNAME }}" \
+          -var="dockerhub_password=${{ secrets.DOCKER_PASSWORD }}" \
+          -var="app_version=$VERSION"
