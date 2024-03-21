@@ -201,9 +201,8 @@ jobs:
       working-directory: ./terraform_iac
       run: |
         terraform init
-        VERSION=$(cat ../weather_app/.app_version)
         terraform state list | grep -q 'module.app.aws_instance.app' && terraform taint module.app.aws_instance.app
         terraform apply -auto-approve \
           -var="dockerhub_username=${{ secrets.DOCKER_USERNAME }}" \
           -var="dockerhub_password=${{ secrets.DOCKER_PASSWORD }}" \
-          -var="app_version=$VERSION"
+          -var="app_version=${{steps.versioning.outputs.NEW_VERSION}}"
