@@ -110,12 +110,14 @@ jobs:
 
     - name: versioning system
       id: versioning
+      working-directory: ./weather_app
       run: |
+        bash get_image_tag.sh ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_REPO }} .app_version
         git config --global user.email pipeline_runner@github.com
         git config --global user.name pipeline_runner
         git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$GITHUB_REPOSITORY
-        NEW_VERSION=$(bash ./weather_app/app_versioning.sh ./weather_app/.app_version patch)
-        git add .
+        NEW_VERSION=$(bash app_versioning.sh .app_version patch)
+        git add .app_version
         git commit -m "new version - $NEW_VERSION"
         git tag -a v$NEW_VERSION -m "Release version $NEW_VERSION"
         git push --tags
