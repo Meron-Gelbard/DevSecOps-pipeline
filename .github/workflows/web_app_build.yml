@@ -210,6 +210,6 @@ jobs:
         -var="LOCATION_API_KEY=${{ secrets.LOCATION_API_KEY }}" \
         -var="ssl_cert_arn=${{ secrets.SSL_ARN }}" \
         -var="app_docker_image=${{ secrets.DOCKER_REPO }}" \
-        -var="app_version=-var="app_version=$VERSION"
+        -var="app_version=$VERSION" \
 
           
