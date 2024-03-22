@@ -207,3 +207,5 @@ jobs:
           -var="dockerhub_username=${{ secrets.DOCKER_USERNAME }}" \
           -var="dockerhub_password=${{ secrets.DOCKER_PASSWORD }}" \
           -var="app_version=$VERSION"
+
+          
