@@ -204,8 +204,12 @@ jobs:
         VERSION=$(cat ../weather_app/.app_version)
         terraform state list | grep -q 'module.app.aws_instance.app' && terraform taint module.app.aws_instance.app
         terraform apply -auto-approve \
-          -var="dockerhub_username=${{ secrets.DOCKER_USERNAME }}" \
-          -var="dockerhub_password=${{ secrets.DOCKER_PASSWORD }}" \
-          -var="app_version=$VERSION"
+        -var="dockerhub_username=${{ secrets.DOCKER_USERNAME }}" \
+        -var="dockerhub_password=${{ secrets.DOCKER_PASSWORD }}" \
+        -var="WEATHER_API_KEY=${{ secrets.WEATHER_API_KEY }}" \
+        -var="LOCATION_API_KEY=${{ secrets.LOCATION_API_KEY }}" \
+        -var="ssl_cert_arn=${{ secrets.SSL_ARN }}" \
+        -var="app_docker_image=${{ secrets.DOCKER_REPO }}" \
+        -var="app_version=-var="app_version=$VERSION"
 
           
